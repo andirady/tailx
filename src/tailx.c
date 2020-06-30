@@ -1,234 +1,234 @@
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include<errno.h>
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<sys/stat.h>
+#include<sys/inotify.h>
+#include<libgen.h>
+#include<unistd.h>
+#include<fcntl.h>
 
-#include <sys/inotify.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <libgen.h>
-#include <linux/limits.h>
+//#define DEBUG
+
+#ifdef DEBUG
+  #define debug(...) printf(__VA_ARGS__)
+#else
+  #define debug(...) /* */
+#endif
+
+#define die(...) { fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE); }
 
 typedef struct {
     int wd;
+    char *name;
     off_t offset;
-    int len; 
-    char *dir;
-    char *path;
 } target_t;
 
-// GLOBAL STATES
-int path_max = 0;
-// END GLOBAL STATES
+/**
+ * Returns 0 on success and 1 if the file does not exists yet.
+ * The program will terminate if the file as well as the parent directory
+ * of the file does not exits.
+ */
+int watch_file(int, char *, target_t *);
 
-int max_path_len(int npath, char **argv)
-{
-    int max = 0;
-    char *bname;
-
-    for (int i = 0; i < npath; i++)
-    {
-        int len = strlen(argv[i]);
-        if (len > max) max = len;
-    }
-    return max;
-}
-
-int get_new_size(int fd, off_t offset)
-{
-    off_t sz = lseek(fd, 0, SEEK_END);
-    if (sz < 0)
-        return offset;
-
-    lseek(fd, offset, SEEK_SET);
-    return sz;
-}
-
-target_t *get_target_by_wd(int ntarget, target_t *targets, int wd)
-{
-    for (int i = 0; i < ntarget; i++)
-    {
-        target_t *t = targets + i;
-        if (t->wd == wd) 
-            return t;
-    }
-
-    return NULL;
-}
-
-int target_with_wd(int ntarget, target_t *targets, int inotd, int wd, const char* name, void (*f)(int, target_t*))
-{
-    int count = 0;
-    char path[PATH_MAX];
-    for (int i = 0; i < ntarget; i++)
-    {
-        target_t *t = targets + i;
-        snprintf(path, sizeof path, "%s/%s", t->dir, name);
-        if (strcmp(path, t->path) == 0 && t->wd == wd)
-        {
-            f(inotd, t);
-            count++;
-        }
-    }
-
-    return count;
-}
-
-int watch_dir(int inotd, target_t *target)
-{
-    int wd = inotify_add_watch(inotd, target->dir, IN_CREATE | IN_DELETE);
-    if (wd < 0) return -1;
-
-    target->wd = wd;
-    target->offset = 0;
-
-    return 0;
-}
-
-void tail(target_t *t)
-{
-    int fd = open(t->path, O_RDONLY);
-    printf("fd = %d\n", fd);
-    int sz = get_new_size(fd, t->offset);
-    int bufsz = sz - t->offset;
-    char *buf = malloc(bufsz * sizeof(char));
-
-    int bytes_read = read(fd, buf, bufsz);
-    printf("path=%s offset=%d bytes_read=%d, sz=%d bufsz=%d\n", t->path, t->offset, bytes_read, sz, bufsz);
-
-    char *token;
-    int total = 0;
-    while ((token = strsep(&buf, "\n")) != NULL)
-    {
-        total += strlen(token) + 1;
-        //printf("total=%d, bufsz=%d, %s\n", total, bufsz, token);
-        if (total <= bufsz)
-            printf("%*s: %s\n", -path_max, t->path, token);
-    }
-
-    t->offset = sz;
-
-    if (token != NULL)
-        free(token);
-
-    free(buf);
-    close(fd);
-}
-
-void file_present_handler(int inotd, target_t *t)
-{
-    //printf("Trying to watch %s\n", t->path);
-    int wd = inotify_add_watch(inotd, t->path, IN_MODIFY | IN_DELETE);
-    if (wd < 0) {
-        perror("File present");
-        exit(EXIT_FAILURE);
-    }
-
-    t->wd = wd;
-    t->offset = 0;
-
-    //printf("Tailing... %s, %d\n", t->path, t->offset);
-    tail(t);
-}
-
+/**
+ * Returns the new offset
+ */
+size_t tail(char *, off_t);
 
 int main(int argc, char **argv)
 {
-    char *prog = argv[0];
+    char *prog_name = argv[0];
+    char **filenames = argv+1;
+    char n_files = argc - 1;
+
+    target_t *targets;
+    if ((targets = malloc(n_files * sizeof *targets)) == NULL)
+        die("Not enough memory");
+
     int inotd = inotify_init();
-    if (inotd < 0)
-    {
-        perror("inotify_init");
-        return errno;
-    }
 
-    int npath = argc - 1;
-    path_max = max_path_len(npath, argv+1);
-    target_t *targets = malloc(npath * sizeof *targets);
-
-    char *path, *dir;
-    for (int i = 0; i < (argc - 1); i++)
-    {
+    for (int i = 0; i < n_files; i++) {
         target_t *t = targets + i;
-        path = argv[i + 1];
-        dir = dirname(strdup(path));
-
-        t->len  = strlen(path);
-        t->dir  = (char*)malloc(sizeof(char*));
-        t->path = (char*)malloc(sizeof(char*));
-
-        strcpy(t->dir, strdup(dir));
-        strcpy(t->path, strdup(path));
-
-        int wd = inotify_add_watch(inotd, t->path, IN_CREATE | IN_MODIFY | IN_DELETE);
-        if (wd < 0)
-        {
-            if (errno != ENOENT)
-            {
-                perror("open");
-                return errno;
-            }
-
-            wd = inotify_add_watch(inotd, t->dir, IN_CREATE | IN_DELETE | IN_ONLYDIR);
+        int rc = watch_file(inotd, *(filenames + i), t);
+        if (rc == 0) {
+            t->offset = tail(t->name, 0);
         }
-
-        if (wd < 0)
-        {
-            perror("Failed to watch");
-            return errno;
-        }
-
-        t->wd     = wd;
-        t->offset = 0;
-        printf("target: dir=%s, path=%s, wd=%d\n", t->dir, t->path, wd);
     }
-
-    //printf("Starting...\n");
 
     char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
     const struct inotify_event *ev;
     char *ptr;
 
-    for (;;)
-    {
+    while (1) {
         int len = read(inotd, buf, sizeof buf);
-        if (len < 0)
-        {
-            perror("read");
-            return errno;
-        }
+        if (len == -1)
+            die("Can't read events");
 
-        for (ptr = buf; ptr < buf + len; ptr += sizeof(struct inotify_event) + ev->len)
-        {
+        for (
+            ptr = buf;
+            ptr < buf + len; ptr += sizeof(struct inotify_event) + ev->len
+        ) {
             ev = (const struct inotify_event*)ptr;
 
-            //printf("New event?: wd=%d, mask=%u, cookie=%u, len=%u, name=%s\n", ev->wd, ev->mask, ev->cookie, ev->len, ev->name);
-            if (ev->mask & IN_CREATE)
-            {
-                printf("IN_CREATE: wd=%d, name=%s\n", ev->wd, ev->name);
-                if (ev->name != NULL) {
-                    printf("Invoking target_with_wd");
-                    target_with_wd(npath, targets, inotd, ev->wd, ev->name, file_present_handler);
+            if (ev->mask & IN_CREATE) {
+                debug("IN_CREATE: wd=%d, name='%s'\n", ev->wd, ev->name);
+                for (int i = 0; i < n_files; i++) {
+                    target_t *t = targets + i;
+                    if (t->wd == ev->wd) {
+                        int rc = watch_file(inotd, t->name, t);
+                        if (rc == 0) {
+                            t->offset = tail(t->name, 0);
+                        }
+                    }
                 }
+            } else if (ev->mask & IN_MODIFY) {
+                debug("IN_MODIFY: wd=%d, name='%s'\n", ev->wd, ev->name);
+                for (int i = 0; i < n_files; i++) {
+                    target_t *t = targets + i;
+                    if (t->wd == ev->wd) {
+                        t->offset = tail(t->name, t->offset);
+                        break;
+                    }
+                }
+            } else if (ev->mask & IN_DELETE) {
+                debug("IN_DELETE: wd=%d, name='%s'\n", ev->wd, ev->name);
+            } else if (ev->mask & IN_DELETE_SELF) {
+                for (int i = 0; i < n_files; i++) {
+                    target_t *t = targets + i;
+                    if (t->wd == ev->wd) {
+                        watch_file(inotd, t->name, t);
+                        break;
+                    }
+                }
+            } else {
+                debug("UNKNOWN: wd=%d, name='%s', mask=%d, cookie=%d\n",
+                      ev->wd, ev->name, ev->mask, ev->cookie);
+
+                if (ev->mask & IN_IGNORED)       debug("  IN_IGNORED\n");
+                if (ev->mask & IN_ISDIR)         debug("  IN_ISDIR\n");
+                if (ev->mask & IN_Q_OVERFLOW)    debug("  IN_Q_OVERFLOW\n");
+                if (ev->mask & IN_UNMOUNT)       debug("  IN_UNMOUNT\n");
+                if (ev->mask & IN_ACCESS)        debug("  IN_ACCESS\n");
+                if (ev->mask & IN_ATTRIB)        debug("  IN_ATTRIB\n");
+                if (ev->mask & IN_CLOSE_WRITE)   debug("  IN_CLOSE_WRITE\n");
+                if (ev->mask & IN_CLOSE_NOWRITE) debug("  IN_CLOSE_NOWRITE\n");
+                if (ev->mask & IN_MOVED_FROM)    debug("  IN_MOVED_FROM\n");
+                if (ev->mask & IN_MOVED_TO)      debug("  IN_MOVED_TO\n");
+                if (ev->mask & IN_OPEN)          debug("  IN_OPEN\n");
             }
-            if (ev->mask & IN_MODIFY)
-            {
-                printf("IN_MODIFY\n");
-                target_t *t = get_target_by_wd(npath, targets, ev->wd);
-                if (t != NULL)
-                    tail(t);
-                else
-                    printf("No target found with wd = %d\n", ev->wd);
-            }
-            if (ev->mask & IN_DELETE)
-            {
-                char is_dir = ev->mask & IN_ISDIR;
-                printf("IN_DELETE: wd=%d, name=%s\n", ev->wd, ev->name);
-            }
+
         }
     }
 
-    //printf("Terminating\n");
-    perror(prog);
-    return errno;
+    close(inotd);
+    return 0;
+}
+
+int watch_file(int inotd, char *fn, target_t *t)
+{
+    int wd, rc = 0;
+    struct stat st;
+
+    t->wd = -1;
+    t->name = fn; // use same reference from the main function
+
+    if (stat(fn, &st)  == -1) {
+        if (errno != ENOENT)
+            die("Can't stat file: %s: %s\n", fn, strerror(errno));
+
+        errno = 0;
+
+        char *dir = dirname(strdup(fn));
+                         // ^^^ pass copy, dirname will mutate the first arg
+        if (stat(dir, &st) == -1)
+            die("Can't stat file or directory: %s: %s\n", fn, strerror(errno));
+
+        if ((wd = inotify_add_watch(inotd, dir, IN_CREATE | IN_DELETE)) == -1)
+            die("Can't watch directory: %s: %s", dir, strerror(errno));
+
+        rc = 1;
+    } else if ((wd = inotify_add_watch(inotd, fn, IN_MODIFY | IN_DELETE_SELF)) == -1)
+        die("Can't watch file: %s: %s", fn, strerror(errno));
+
+    t->wd = wd;
+    debug("fn=%s, wd=%d, not_exists=%d\n", fn, wd, rc);
+    return rc;
+}
+
+size_t tail(char *fn, off_t offset)
+{
+    const char line_sep[2] = "\n";
+    struct stat st;
+
+    if (stat(fn, &st) == -1)
+        die("Can't stat file: %s: %s\n", fn, strerror(errno));
+
+    int fd = open(fn, O_RDONLY);
+    if (fd == -1)
+        die("Can't open file for reading: %s: %s", fn, strerror(errno));
+
+    int rc = lseek(fd, offset, SEEK_SET);
+    if (rc == -1)
+        die("Can't seek file: %s: %s", fn, strerror(errno));
+
+    char buf[BUFSIZ];
+    int rd, total_rd = 0;
+
+    int rem = st.st_size;
+    int cont = 0;
+
+    while (rem > 0) {
+        int rd = read(fd, buf, BUFSIZ);
+        if (rd == -1)
+            die("Can't read file: %s: %s", fn, strerror(errno));
+
+        rem -= rd;
+
+        char *tmp = (char*)malloc((rd + 1) * sizeof(char));
+        strncpy(tmp, buf, rd + 1);
+
+        int i = 0;
+#ifdef DEBUG
+        char *prev_tok = (char*)malloc(sizeof(char*));
+#endif
+        char *tok = strtok(tmp, line_sep);
+
+        while (tok != NULL) {
+            char last_ch = buf[i + strlen(tok)];
+            i += strlen(tok) + 1;
+
+#ifdef DEBUG
+            if (prev_tok != NULL && strcmp(tok, prev_tok) == 0) {
+                die("Non unique line found!");
+            }
+            prev_tok = tok;
+#endif
+
+            if (cont) {
+                printf(tok);
+                cont = 0;
+            } else {
+                printf("%s: %s", fn, tok);
+            }
+
+            tok = strtok(NULL, line_sep);
+            if (tok == NULL && rem == 0) {
+                printf("\n");
+                break;
+            }
+
+            if (tok != NULL || last_ch == '\n' || rem == 0) {
+                printf("\n");
+            } else if (rem != 0) {
+                cont = 1;
+            }
+        }
+
+        free(tmp);
+        memset(buf, '\0', rd);
+    }
+
+    close(fd);
+    return st.st_size;
 }
