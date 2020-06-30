@@ -11,6 +11,7 @@
 //#define DEBUG
 
 #ifdef DEBUG
+  //#define CHECK_UNIQUE
   #define debug(...) printf(__VA_ARGS__)
 #else
   #define debug(...) /* */
@@ -70,9 +71,10 @@ int main(int argc, char **argv)
             ptr < buf + len; ptr += sizeof(struct inotify_event) + ev->len
         ) {
             ev = (const struct inotify_event*)ptr;
+            char *name = strndup(ev->name, ev->len);
 
             if (ev->mask & IN_CREATE) {
-                debug("IN_CREATE: wd=%d, name='%s'\n", ev->wd, ev->name);
+                debug("IN_CREATE: wd=%d, name='%s'\n", ev->wd, ev->len, name);
                 for (int i = 0; i < n_files; i++) {
                     target_t *t = targets + i;
                     if (t->wd == ev->wd) {
@@ -83,7 +85,7 @@ int main(int argc, char **argv)
                     }
                 }
             } else if (ev->mask & IN_MODIFY) {
-                debug("IN_MODIFY: wd=%d, name='%s'\n", ev->wd, ev->name);
+                debug("IN_MODIFY: wd=%d, len=%d, name='%s'\n", ev->wd, ev->len, name);
                 for (int i = 0; i < n_files; i++) {
                     target_t *t = targets + i;
                     if (t->wd == ev->wd) {
@@ -92,7 +94,7 @@ int main(int argc, char **argv)
                     }
                 }
             } else if (ev->mask & IN_DELETE) {
-                debug("IN_DELETE: wd=%d, name='%s'\n", ev->wd, ev->name);
+                debug("IN_DELETE: wd=%d, name='%s'\n", ev->wd, ev->len, name);
             } else if (ev->mask & IN_DELETE_SELF) {
                 for (int i = 0; i < n_files; i++) {
                     target_t *t = targets + i;
@@ -102,8 +104,8 @@ int main(int argc, char **argv)
                     }
                 }
             } else {
-                debug("UNKNOWN: wd=%d, name='%s', mask=%d, cookie=%d\n",
-                      ev->wd, ev->name, ev->mask, ev->cookie);
+                debug("UNKNOWN: wd=%d, len=%d, name='%s', mask=%d, cookie=%d\n",
+                      ev->wd, ev->len, name, ev->mask, ev->cookie);
 
                 if (ev->mask & IN_IGNORED)       debug("  IN_IGNORED\n");
                 if (ev->mask & IN_ISDIR)         debug("  IN_ISDIR\n");
@@ -189,7 +191,7 @@ size_t tail(char *fn, off_t offset)
         strncpy(tmp, buf, rd + 1);
 
         int i = 0;
-#ifdef DEBUG
+#ifdef CHECK_UNIQUE
         char *prev_tok = (char*)malloc(sizeof(char*));
 #endif
         char *tok = strtok(tmp, line_sep);
@@ -198,7 +200,7 @@ size_t tail(char *fn, off_t offset)
             char last_ch = buf[i + strlen(tok)];
             i += strlen(tok) + 1;
 
-#ifdef DEBUG
+#ifdef CHECK_UNIQUE
             if (prev_tok != NULL && strcmp(tok, prev_tok) == 0) {
                 die("Non unique line found!");
             }
@@ -227,8 +229,12 @@ size_t tail(char *fn, off_t offset)
 
         free(tmp);
         memset(buf, '\0', rd);
+
+        if (!cont)
+            break;
     }
 
     close(fd);
+    debug("Done tailing %s\n", fn);
     return st.st_size;
 }
