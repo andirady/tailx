@@ -120,6 +120,7 @@ int main(int argc, char **argv)
                 if (ev->mask & IN_OPEN)          debug("  IN_OPEN\n");
             }
 
+            free(name);
         }
     }
 
