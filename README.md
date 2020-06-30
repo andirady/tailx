@@ -21,17 +21,32 @@ file2.txt: content in file2.txt
 
 ## Alternative
 
-Just use tail as follows
+1. Just use tail as follows
 
-```bash
-tail -F file1.txt file2.txt
-```
+   ```bash
+   tail -F file1.txt file2.txt
+   ```
 
-This will output as follows:
-```
-==> file1.txt <==
-content in file1.txt
+   This will output as follows:
+   ```
+   ==> file1.txt <==
+   content in file1.txt
 
-==> file2.txt <==
-content in file2.txt
-```
+   ==> file2.txt <==
+   content in file2.txt
+   ```
+
+2. Use tail with awk (see [this post](https://unix.stackexchange.com/a/195930))
+
+   ```bash
+   tail -F file1.txt file2.txt | awk '/^==> / {a=substr($0, 5, length-8); next} {print a": "$0}'
+   ```
+
+   This will output as follows:
+   ```
+   file1.txt: content in file1.txt
+   file1.txt:
+   file2.txt: content in file2.txt
+   file2.txt:
+   ```
+   NOTE: The empty lines are part of the section separator, not the actual content of the files.
